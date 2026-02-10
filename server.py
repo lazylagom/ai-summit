@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import logging
+import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from datetime import datetime, timezone
 
@@ -40,31 +41,80 @@ logger = logging.getLogger("ai_summit")
 # ---------------------------------------------------------------------------
 DEFAULT_ROUNDS = 2
 MAX_ROUNDS = 5
-CLI_TIMEOUT = 300  # 5 minutes for CLI calls
+CLI_TIMEOUT = 300  # 5 minutes default for CLI calls
+CLAUDE_CLI_TIMEOUT = 600  # 10 minutes for Claude (tool use takes longer)
 
-REVIEW_SYSTEM_PROMPT = """You are an expert AI reviewer participating in an AI Summit — a multi-LLM debate.
+RESEARCH_RULES = """
+## Research Rules (MANDATORY)
+- You MUST search the web or look up actual sources before making any factual claim.
+- NEVER speculate, guess, or rely solely on training data for factual questions.
+- For every major claim, provide a source (URL, file path, documentation link).
+- If you cannot verify something, explicitly mark it as: **[미검증/Unverified]**
+- Clearly separate verified facts from your own analysis/opinions.
+- When asked about source code, search for and cite the ACTUAL code — do not reconstruct from memory.
+"""
+
+INITIAL_SYSTEM_PROMPT = f"""You are an expert AI participating in an AI Summit — a multi-LLM debate.
+Your role is to provide the initial solution to the given question.
+
+{RESEARCH_RULES}
+Instructions:
+1. Research the topic thoroughly before answering
+2. Provide a comprehensive, well-structured solution
+3. Cite sources for all factual claims
+4. Be specific and actionable
+
+Respond in the same language as the original question."""
+
+REVIEW_SYSTEM_PROMPT = f"""You are an expert AI reviewer participating in an AI Summit — a multi-LLM debate.
 Your role is to critically evaluate the previous AI's solution and improve it.
 
+{RESEARCH_RULES}
 Instructions:
-1. Identify flaws, edge cases, or missed considerations
-2. Propose concrete improvements with reasoning
-3. If the solution is already optimal, confirm it and explain why
-4. Be specific, constructive, and concise
+1. Verify the previous AI's claims — search and fact-check before agreeing or disagreeing
+2. Identify flaws, unsourced claims, edge cases, or missed considerations
+3. Propose concrete improvements with reasoning and sources
+4. If the solution is already optimal, confirm it with evidence
 5. Preserve what works well from the previous solution
 
 Respond in the same language as the original question."""
 
-SYNTHESIS_SYSTEM_PROMPT = """You are the final synthesizer in an AI Summit — a multi-LLM debate.
+SYNTHESIS_SYSTEM_PROMPT = f"""You are the final synthesizer in an AI Summit — a multi-LLM debate.
 Multiple AI models have debated and refined a solution through several rounds.
 
-Your job:
-1. Review the entire debate history
-2. Extract the best ideas from each AI's contributions
-3. Resolve any remaining disagreements
-4. Produce a FINAL, definitive, production-ready answer
-5. If the answer involves code, provide complete, working implementation
+{RESEARCH_RULES}
 
-Respond in the same language as the original question."""
+You MUST structure your response in the following format:
+
+---
+
+## 📊 Provider별 의견 정리
+
+For EACH participating AI, write a concise summary of their key arguments,
+unique insights, and final position. Use this format for each:
+
+### {emoji} {Provider Name}
+- **핵심 주장**: (their main argument in 1-2 sentences)
+- **고유 인사이트**: (unique points only this provider raised)
+- **최종 입장**: (their final position after all rounds)
+
+## 🤝 합의점 (Points of Agreement)
+List the points where all or most providers agreed.
+
+## ⚡ 쟁점 (Points of Disagreement)
+List the points where providers disagreed, with brief explanation of each side.
+
+## 🏆 최종 결론 (Final Conclusion)
+Provide the definitive, production-ready answer that synthesizes the best ideas.
+Resolve all disagreements with clear reasoning for your choices.
+If the answer involves code, provide complete, working implementation.
+
+---
+
+IMPORTANT:
+- The Provider summary section must cover EVERY participating AI individually.
+- The Final Conclusion must be comprehensive and actionable, not just a summary.
+- Respond in the same language as the original question."""
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +151,11 @@ class Provider:
 # ---------------------------------------------------------------------------
 # CLI Call Functions (local CLI tools — no API keys needed)
 # ---------------------------------------------------------------------------
-async def _run_cli(cmd: List[str], input_data: Optional[bytes] = None) -> str:
+async def _run_cli(
+    cmd: List[str],
+    input_data: Optional[bytes] = None,
+    timeout: int = CLI_TIMEOUT,
+) -> str:
     """Run a CLI command and return stdout, with timeout handling."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -111,11 +165,11 @@ async def _run_cli(cmd: List[str], input_data: Optional[bytes] = None) -> str:
     )
     try:
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input_data), timeout=CLI_TIMEOUT
+            proc.communicate(input_data), timeout=timeout
         )
     except asyncio.TimeoutError:
         proc.kill()
-        return f"Error: CLI timed out after {CLI_TIMEOUT}s."
+        return f"Error: CLI timed out after {timeout}s."
     if proc.returncode != 0:
         return f"Error (exit {proc.returncode}): {stderr.decode()[:500]}"
     return stdout.decode().strip()
@@ -127,12 +181,12 @@ async def _call_claude_cli(
     model: str = "",
     max_tokens: int = 4096,
 ) -> str:
-    cmd = ["claude", "-p", "--no-session-persistence"]
+    cmd = ["claude", "-p", "--no-session-persistence", "--max-turns", "3"]
     if system_prompt:
         cmd.extend(["--system-prompt", system_prompt])
     if model:
         cmd.extend(["--model", model])
-    return await _run_cli(cmd, input_data=prompt.encode())
+    return await _run_cli(cmd, input_data=prompt.encode(), timeout=CLAUDE_CLI_TIMEOUT)
 
 
 async def _call_codex_cli(
@@ -455,14 +509,27 @@ async def summit_run(params: SummitInput, ctx: Context) -> str:
 
     total_steps = 1 + params.rounds + (1 if params.include_synthesis else 0)
     step = 0
+    summit_start = time.time()
+
+    # --- Announce plan ---
+    synthesis_label = " → 최종 합성" if params.include_synthesis else ""
+    await ctx.info(
+        f"🏔️ AI Summit 시작! 참가자: {provider_names}\n"
+        f"📋 계획: Round 0 (초기 답변) → Round 1~{params.rounds} (리뷰){synthesis_label}"
+    )
 
     # --- Round 0: Initial solution from first provider ---
     first = active[0]
     transcript.append("## Round 0 — Initial Solution")
     await ctx.report_progress(step, total_steps)
-    await ctx.info(f"⏳ Round 0: {first.emoji} {first.name} generating initial solution...")
+    step_start = time.time()
+    await ctx.info(f"⏳ [1/{total_steps}] Round 0: {first.emoji} {first.name} 초기 답변 생성 중...")
     logger.info(f"Round 0: {first.name} initial solution...")
-    initial = await first.call_fn(params.question, model=first.model)
+    initial = await first.call_fn(
+        params.question, system_prompt=INITIAL_SYSTEM_PROMPT, model=first.model
+    )
+    step_elapsed = time.time() - step_start
+    await ctx.info(f"✅ [1/{total_steps}] Round 0 완료 — {first.emoji} {first.name} ({step_elapsed:.0f}초)")
     history.append({"ai": first.name, "round": 0, "role": "initial", "response": initial})
     transcript.append(f"### {first.emoji} {first.name}\n\n{initial}\n")
     step += 1
@@ -471,15 +538,19 @@ async def summit_run(params: SummitInput, ctx: Context) -> str:
 
     # --- Parallel Debate Rounds ---
     async def _call_reviewer(provider: Provider, prompt: str, system: str):
+        t0 = time.time()
         resp = await provider.call_fn(prompt, system_prompt=system, model=provider.model)
+        elapsed = time.time() - t0
+        await ctx.info(f"  ✓ {provider.emoji} {provider.name} 리뷰 완료 ({elapsed:.0f}초)")
         return provider, resp
 
     for r in range(1, params.rounds + 1):
         transcript.append(f"## Round {r}")
         await ctx.report_progress(step, total_steps)
+        step_start = time.time()
 
         reviewer_names = " + ".join(f"{p.emoji}{p.name}" for p in active)
-        await ctx.info(f"⏳ Round {r}: {reviewer_names} reviewing in parallel...")
+        await ctx.info(f"⏳ [{step+1}/{total_steps}] Round {r}: {reviewer_names} 병렬 리뷰 중...")
         logger.info(f"Round {r}: parallel review by {', '.join(p.name for p in active)}...")
 
         review_prompt = _build_parallel_review_prompt(params.question, previous_round_responses)
@@ -498,6 +569,8 @@ async def summit_run(params: SummitInput, ctx: Context) -> str:
             transcript.append(f"### {provider.emoji} {provider.name} Review\n\n{resp}\n")
             round_responses.append({"ai_name": provider.name, "response": resp})
 
+        step_elapsed = time.time() - step_start
+        await ctx.info(f"✅ [{step+1}/{total_steps}] Round {r} 완료 ({step_elapsed:.0f}초)")
         previous_round_responses = round_responses
         transcript.append("---")
         step += 1
@@ -507,33 +580,41 @@ async def summit_run(params: SummitInput, ctx: Context) -> str:
     if params.include_synthesis:
         transcript.append("## 🏆 Final Synthesis")
         await ctx.report_progress(step, total_steps)
+        step_start = time.time()
 
         synthesizer = active[0]
-        await ctx.info(f"⏳ {synthesizer.emoji} {synthesizer.name} synthesizing final answer...")
+        await ctx.info(f"⏳ [{step+1}/{total_steps}] 최종 합성: {synthesizer.emoji} {synthesizer.name} 토론 종합 중...")
         logger.info("Final synthesis...")
 
         debate_summary = "\n\n".join(
             f"**{e['ai']}** (Round {e['round']}, {e['role']}):\n{e['response']}"
             for e in history
         )
+        participant_list = "\n".join(f"- {p.emoji} {p.name}" for p in active)
         synthesis_prompt = f"""## Original Question
 {params.question}
+
+## Participating Providers
+{participant_list}
 
 ## Complete Summit Debate History
 {debate_summary}
 
 ---
-Please synthesize the best solution from this summit."""
+Synthesize this summit. You MUST include a separate summary for each provider listed above."""
 
         final_answer = await synthesizer.call_fn(
             synthesis_prompt, system_prompt=SYNTHESIS_SYSTEM_PROMPT, model=synthesizer.model
         )
+        step_elapsed = time.time() - step_start
+        await ctx.info(f"✅ [{step+1}/{total_steps}] 최종 합성 완료 — {synthesizer.emoji} {synthesizer.name} ({step_elapsed:.0f}초)")
         history.append({"ai": synthesizer.name, "round": params.rounds + 1, "role": "synthesizer", "response": final_answer})
         transcript.append(f"\n{final_answer}\n")
         step += 1
 
+    total_elapsed = time.time() - summit_start
     await ctx.report_progress(total_steps, total_steps)
-    await ctx.info("✅ Summit completed!")
+    await ctx.info(f"🏁 Summit 완료! 총 {len(history)}회 교환, 소요 시간: {total_elapsed:.0f}초")
 
     # --- Store ---
     _summit_store[summit_id] = {
