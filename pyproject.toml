@@ -1,0 +1,13 @@
+[project]
+name = "ai-summit"
+version = "1.0.0"
+description = "AI Summit MCP Server - Multi-LLM debate and cross-validation platform"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "pydantic>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
