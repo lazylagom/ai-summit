@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Summit"
+  short_description: "Run structured multi-LLM debate using local CLIs"
+  default_prompt: "Use AI Summit to gather parallel reviews from available AI CLIs and synthesize an actionable final answer."

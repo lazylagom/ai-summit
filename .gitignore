@@ -1,8 +1,8 @@
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
+node_modules/
 dist/
 build/
+coverage/
 .env
 .claude/settings.local.json
+.DS_Store
+*.log

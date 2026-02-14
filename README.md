@@ -1,130 +1,98 @@
-# 🏔️ AI Summit
+# AI Summit
 
-Claude Code에서 **여러 LLM CLI를 교차 검증하며 토론시키는** MCP 서버입니다.
+여러 AI CLI를 병렬 토론시켜 합의점과 실행안을 만드는 TypeScript Skill입니다.
 
-```
-질문 → Claude(초기안) → [Codex + Gemini + Claude 병렬 리뷰] × N라운드 → 최종 합성
-```
-
-## 지원 모델
-
-| Provider | CLI 명령어 | 환경변수 (모델 오버라이드) |
-|----------|-----------|--------------------------|
-| 🟣 Claude | `claude` | `CLAUDE_MODEL` |
-| 🟢 Codex | `codex` | `CODEX_MODEL` |
-| 🔵 Gemini | `gemini` | `GEMINI_MODEL` |
-| 🟡 DeepSeek | `deepseek` | `DEEPSEEK_MODEL` |
-| 🟠 Mistral | `mistral` | `MISTRAL_MODEL` |
-
-> CLI가 설치된 모델만 자동으로 참여합니다. API 키 불필요. **새 모델 추가는 `PROVIDERS` dict에 등록하면 끝.**
-
-## 제공 Tools
-
-| Tool | 설명 |
-|------|------|
-| `summit_run` | 전체 토론 자동 실행 (병렬 N라운드 + 합성) |
-| `summit_ask` | 특정 LLM에 개별 질문/검증 요청 |
-| `summit_providers` | 현재 사용 가능한 LLM 목록 확인 |
-| `summit_history` | 현재 세션의 토론 기록 조회 |
+- Runtime: TypeScript (`bun`)
+- Mode: Skill only
+- Not supported: Python/MCP server
 
 ## 설치
 
-### 1. 의존성
+```bash
+# add-skill CLI
+npx add-skill lazylagom/ai-summit --skill ai-summit
+
+# skills CLI
+npx skills add lazylagom/ai-summit --skill ai-summit
+```
+
+설치 후 Codex/Claude Code를 재시작하세요.
+
+## 요구사항
+
+- `bun`
+- 아래 CLI 중 2개 이상 설치
+  - `claude`
+  - `codex`
+  - `gemini`
+  - `deepseek`
+  - `mistral`
+
+## 빠른 시작
 
 ```bash
-cd ai-summit
-pip install -e .
+SCRIPT_PATH="${CODEX_HOME:-$HOME/.codex}/skills/ai-summit/scripts/summit.ts"
+
+bun run "$SCRIPT_PATH" \
+  --question "이 아키텍처를 검토하고 실행 계획을 제시해줘" \
+  --providers claude,codex,gemini \
+  --rounds 2
 ```
 
-### 2. CLI 도구 설치
-
-최소 2개 이상의 CLI 도구가 필요합니다:
+JSON 로그 저장:
 
 ```bash
-# Claude Code (https://docs.anthropic.com/en/docs/claude-code)
-# Codex (https://github.com/openai/codex)
-# Gemini CLI (https://github.com/google-gemini/gemini-cli)
+SCRIPT_PATH="${CODEX_HOME:-$HOME/.codex}/skills/ai-summit/scripts/summit.ts"
+
+bun run "$SCRIPT_PATH" \
+  --question "..." \
+  --output json \
+  --save-log /tmp/ai-summit-result.json
 ```
 
-### 3. Claude Code에 등록
+## 옵션
 
 ```bash
-# 글로벌 등록 (모든 프로젝트에서 사용)
-claude mcp add --scope user ai-summit -- python /절대경로/ai-summit/server.py
-
-# 프로젝트 등록 (현재 프로젝트에서만 사용)
-claude mcp add ai-summit -- python /절대경로/ai-summit/server.py
+bun run "$SCRIPT_PATH" --help
 ```
 
-## 사용법
+주요 옵션:
 
-### 자연어 요청
+- `--question <text>`: 질문 본문
+- `--providers <csv>`: 참여 provider 목록 (`claude,codex,gemini`)
+- `--rounds <1-5>`: 토론 라운드 수
+- `--consensus-threshold <0-1>`: 조기 종료 임계치
+- `--no-early-stop`: 조기 종료 비활성화
+- `--output <markdown|json>`: 출력 형식
+- `--save-log <path>`: JSON 결과 파일 저장
 
-```
-이 설계에 대해 다른 AI들 의견도 듣고 싶어. summit_run으로 토론해줘.
-```
+## 스킬 사용 예시
 
-### 특정 모델만 지정
+- `ai-summit으로 이 설계를 다중 모델 검증해줘.`
+- `ai-summit으로 2라운드 토론 후 실행 계획까지 정리해줘.`
+- `claude,codex,gemini만 써서 리스크 중심으로 비교해줘.`
 
-```
-summit_run으로 Claude, Gemini 2개만 토론시켜줘.
-```
+## 로컬 개발
 
-### 수동 오케스트레이션
-
-Claude Code가 직접 흐름 제어:
-```
-1. 내가 먼저 답변
-2. summit_ask로 Codex에 검증 → Gemini에 검증
-3. "합의됐으니 여기서 멈추자" 판단
-4. 최종 답변 작성
-```
-
-## 병렬 실행
-
-라운드 내 모든 리뷰어가 **동시에** 실행됩니다:
-
-```
-Round 0: Claude 초기안 생성          ← 순차
-Round 1: Claude + Codex + Gemini     ← 병렬 (asyncio.gather)
-Round 2: Claude + Codex + Gemini     ← 병렬
-Synthesis: Claude 최종 합성          ← 순차
+```bash
+bun run summit:help
+bun run summit --question "Review this design" --rounds 2
 ```
 
-3개 프로바이더 + 2라운드 기준: 순차 8단계 → **병렬 4단계** (약 2배 빠름)
+## 문제 해결
 
-실행 중 MCP 진행 상황 알림으로 현재 누가 무엇을 하는지 확인할 수 있습니다.
+- `Need at least 2 installed provider CLIs` 오류
+  - 최소 2개 provider CLI를 설치하고, 터미널에서 `which <cli>`로 PATH 인식 여부 확인
+- `Error (exit ...)` 오류
+  - 각 CLI 인증 상태, 모델 옵션, 네트워크 상태를 provider별로 점검
 
-## 새 CLI 프로바이더 추가하기
+## 프로젝트 구조
 
-`server.py`에서 2곳만 수정:
+- `skills/ai-summit/SKILL.md`: 스킬 본문 지침
+- `skills/ai-summit/agents/openai.yaml`: UI 메타데이터
+- `skills/ai-summit/scripts/summit.ts`: 오케스트레이터
+- `skills/ai-summit/references/cli-usage.md`: 실행 레퍼런스
 
-```python
-# 1. CLI 호출 함수 추가
-async def _call_newmodel_cli(prompt, system_prompt="", model="", max_tokens=4096):
-    full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-    cmd = ["newmodel"]
-    if model:
-        cmd.extend(["-m", model])
-    return await _run_cli(cmd, input_data=full_prompt.encode())
+## 버전
 
-# 2. PROVIDERS dict에 등록
-PROVIDERS["newmodel"] = Provider(
-    name="NewModel",
-    emoji="🔴",
-    cli_cmd="newmodel",
-    call_fn=_call_newmodel_cli,
-    model_env_var="NEWMODEL_MODEL",
-)
-```
-
-끝! CLI만 설치하면 다음 summit부터 자동 참여합니다.
-
-## 호출 횟수 참고
-
-Provider 3개, 2라운드 기준:
-
-- 초기 답변 1회 + 라운드당 3회(병렬) × 2 + 합성 1회 = **8회 CLI 호출 (벽시계 4단계)**
-- Provider 5개, 3라운드: 초기 1 + 라운드당 5(병렬) × 3 + 합성 1 = **17회 (벽시계 5단계)**
-
-간단한 질문은 1라운드, 아키텍처 결정은 2-3라운드 권장.
+- `v2.x`: TypeScript Skill 전용

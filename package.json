@@ -1,0 +1,10 @@
+{
+  "name": "ai-summit-skill",
+  "version": "2.0.0",
+  "private": true,
+  "description": "AI Summit TypeScript Skill runtime",
+  "scripts": {
+    "summit": "bun run skills/ai-summit/scripts/summit.ts",
+    "summit:help": "bun run skills/ai-summit/scripts/summit.ts --help"
+  }
+}
